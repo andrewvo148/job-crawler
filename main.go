@@ -9,9 +9,27 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
 
 	"github.com/gocolly/colly"
 )
+
+type Company struct {
+	ID           primitive.ObjectID
+	Name         string
+	Logo         string
+	CoverImage   string
+	Size         string
+	Location     string
+	Path         string
+	National     string
+	Service      string
+	BusinessDays string
+	jobCounts    int32
+	IsOverTime   bool
+	CreatedAt    int64
+	UpdatedAt    int64
+}
 
 type JobDetails struct {
 	ID                 primitive.ObjectID `bson:"_id"`
@@ -24,6 +42,7 @@ type JobDetails struct {
 	LoveWorking        string
 	CreatedAt          int64
 	UpdatedAt          int64
+	Path               string
 }
 
 func main() {
@@ -107,29 +126,42 @@ func main() {
 	// 	// Only those links are visited which are in AllowedDomains
 	// 	// c.Visit(e.Request.AbsoluteURL(link))
 	// })
+	//crawlJob(c, client)
 
+	companyCollector := c.Clone()
+	crawlCompany(companyCollector, client, ctx)
+	//companyCollector.Wait()
+}
+
+func crawlJob(c *colly.Collector, client *mongo.Client, ctx context.Context) {
 	c.OnHTML("div.details > h3.title.job-details-link-wrapper > a[href]", func(e *colly.HTMLElement) {
 		link := e.Attr("href")
+
 		// Print link
 		fmt.Printf("Link found: %q -> %s\n", e.Text, link)
+
+		// absoluteURL := e.Request.AbsoluteURL(link)
 		// Visit link found on page
 		// Only those links are visited which are in AllowedDomains
 		c.Visit(e.Request.AbsoluteURL(link))
 	})
 
 	regex := regexp.MustCompile("\\s+")
+
 	c.OnHTML("div.jd-page__job-details div.job-details", func(e *colly.HTMLElement) {
 		var jobDetails JobDetails
 		fmt.Printf("\n\n")
 		fmt.Println("-------JOB DETAILS--------")
 		fmt.Println("---------------------------")
 
+		jobDetails.Path = e.Request.URL.String()
+		fmt.Printf("Path: %s\n", jobDetails.Path)
+
 		jobDetails.Title = e.ChildText("h1.job-details__title")
 		fmt.Printf("Title: %s\n", jobDetails.Title)
 
 		tags := e.ChildText("div.job-details__tag-list span")
 		tags = regex.ReplaceAllString(tags, " ")
-		fmt.Printf("%s\n", tags)
 		fmt.Printf("Tags: %s\n", tags)
 		jobDetails.Tags = strings.Split(tags, " ")
 
@@ -210,5 +242,94 @@ func main() {
 	// Start scraping on https://hackerspaces.org
 	c.Visit("https://itviec.com/it-jobs")
 
-	//c.Wait()
+}
+
+func crawlCompany(companyCollector *colly.Collector, client *mongo.Client, ctx context.Context) {
+
+	companyCollector.OnHTML("div.featured-companies a.featured-company", func(e *colly.HTMLElement) {
+		link := e.Attr("href")
+		link = strings.TrimSuffix(link, "/review")
+		// Print link
+		fmt.Printf("Link found: %q -> %s\n", e.Text, link)
+		// absoluteURL := e.Request.AbsoluteURL(link)
+		// Visit link found on page
+		// Only those links are visited which are in AllowedDomains
+		companyCollector.Visit(e.Request.AbsoluteURL(link))
+	})
+
+	companyCollector.OnHTML("div.company-content .headers", func(e *colly.HTMLElement) {
+		var company Company
+		fmt.Printf("\n\n")
+
+		company.Path = e.Request.URL.String()
+		fmt.Printf("Path: %s\n", company.Path)
+
+		company.Name = e.ChildText("h1.headers__info__name")
+		fmt.Printf("Name: %s\n", company.Name)
+
+		info := e.DOM.Find(".headers__info .svg-icon__text")
+		company.Location, _ = info.Eq(0).Html()
+		fmt.Printf("Location: %s\n", company.Location)
+
+		company.Location, _ = info.Eq(0).Html()
+		fmt.Printf("Location: %s\n", company.Location)
+
+		company.Service, _ = info.Eq(1).Html()
+		fmt.Printf("Service: %s\n", company.Service)
+
+		company.Size, _ = info.Eq(2).Html()
+		fmt.Printf("Size: %s\n", company.Size)
+
+		company.National, _ = info.Eq(3).Html()
+		fmt.Printf("National: %s\n", company.National)
+
+		company.BusinessDays, _ = info.Eq(4).Html()
+		fmt.Printf("BusinessDays: %s\n", company.BusinessDays)
+
+		overTime, _ := info.Eq(5).Html()
+		if overTime == "No OT" {
+			company.IsOverTime = false
+		} else {
+			company.IsOverTime = true
+		}
+
+		fmt.Printf("OverTime: %s\n", overTime)
+
+		company.ID = primitive.NewObjectID()
+
+		fmt.Printf("%v", company)
+
+		ctx2, _ := context.WithTimeout(ctx, 1000*time.Millisecond)
+		//defer cancel() // releases resources if slowOperation completes before timeout elapses
+		insertOneResult, err := insertOne(client, ctx2, "jobs",
+			"company", company)
+
+		// handle the error
+		if err != nil {
+			log.Println(err)
+		}
+
+		// if it is inserted.
+		fmt.Println("Result of InsertOne")
+		fmt.Println(insertOneResult)
+
+		fmt.Println("---------------------------")
+		fmt.Println("---------------------------")
+		fmt.Printf("\n\n")
+	})
+
+	companyCollector.OnHTML("div.featured-companies #show-more-wrapper > #show_more a[href]", func(e *colly.HTMLElement) {
+		rel := e.Attr("rel")
+		if rel == "next" {
+			nextPage := e.Request.AbsoluteURL(e.Attr("href"))
+			companyCollector.Visit(nextPage)
+		}
+	})
+
+	companyCollector.OnRequest(func(r *colly.Request) {
+		fmt.Println("Visiting URL: ", r.URL.String())
+	})
+
+	companyCollector.Visit("https://itviec.com/companies?page=1")
+
 }
