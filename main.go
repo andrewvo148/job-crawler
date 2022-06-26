@@ -5,28 +5,32 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 
-	"github.com/gocolly/colly"
+	"github.com/gocolly/colly/v2"
 )
 
 type Company struct {
-	ID           primitive.ObjectID
+	ID           primitive.ObjectID `bson:"_id"`
 	Name         string
 	Logo         string
 	CoverImage   string
 	Size         string
 	Location     string
+	Stars        float64
+	KeySkills    []string
 	Path         string
 	National     string
 	Service      string
 	BusinessDays string
 	jobCounts    int32
 	IsOverTime   bool
+	JobsDetails  []JobDetails
 	CreatedAt    int64
 	UpdatedAt    int64
 }
@@ -43,18 +47,25 @@ type JobDetails struct {
 	CreatedAt          int64
 	UpdatedAt          int64
 	Path               string
+	CompanyId          primitive.ObjectID
 }
+
+var (
+	regex                = regexp.MustCompile("\\s+")
+	jobURLToCompanyIdMap = make(map[string]primitive.ObjectID)
+	//mapLock              sync.RWMutex
+)
 
 func main() {
 
 	// get Client, Context, CancelFunc and err from connect method.
-	client, ctx, _, err := connect("mongodb://admin:admin@127.0.0.1:27017/")
+	client, ctx, cancel, err := connect("mongodb://admin:admin@127.0.0.1:27017/")
 	if err != nil {
 		panic(err)
 	}
 
 	// Release resource when main function is returned.
-	//	defer close(client, ctx, cancel)
+	defer close(client, ctx, cancel)
 
 	// Ping mongoDB with Ping method
 	ping(client, ctx)
@@ -93,11 +104,22 @@ func main() {
 	// fmt.Println(insertOneResult.InsertedID)
 
 	// Instantiate default collector
-	c := colly.NewCollector(
+	companyCollector := colly.NewCollector(
 		// Visit only domains: hackerspaces.org, wiki.hackerspaces.org
 		colly.AllowedDomains("itviec.com"),
-		//colly.Async(true),
+		// Allow visiting the same page multiple times
+		colly.AllowURLRevisit(),
+
+		colly.Async(true),
 	)
+
+	companyCollector.Limit(&colly.LimitRule{
+		// Filter domains affected by this rule
+		// Set a delay between requests to these domains
+		Delay: 1 * time.Second,
+		// Add an additional random delay
+		RandomDelay: 1 * time.Second,
+	})
 
 	// authenticate
 	// err := c.Post("http://itviec.com/sign_in", map[string]string{"user_email": "andrew12@yopmail.com", "password": "12345678"})
@@ -128,25 +150,27 @@ func main() {
 	// })
 	//crawlJob(c, client)
 
-	companyCollector := c.Clone()
-	crawlCompany(companyCollector, client, ctx)
-	//companyCollector.Wait()
+	jobCollector := companyCollector.Clone()
+	crawlJob(jobCollector, client, ctx)
+
+	crawlCompany(companyCollector, jobCollector, client, ctx)
+
+	companyCollector.Wait()
+	jobCollector.Wait()
 }
 
 func crawlJob(c *colly.Collector, client *mongo.Client, ctx context.Context) {
-	c.OnHTML("div.details > h3.title.job-details-link-wrapper > a[href]", func(e *colly.HTMLElement) {
-		link := e.Attr("href")
+	// c.OnHTML("div.details > h3.title.job-details-link-wrapper > a[href]", func(e *colly.HTMLElement) {
+	// 	link := e.Attr("href")
 
-		// Print link
-		fmt.Printf("Link found: %q -> %s\n", e.Text, link)
+	// 	// Print link
+	// 	fmt.Printf("Link found: %q -> %s\n", e.Text, link)
 
-		// absoluteURL := e.Request.AbsoluteURL(link)
-		// Visit link found on page
-		// Only those links are visited which are in AllowedDomains
-		c.Visit(e.Request.AbsoluteURL(link))
-	})
-
-	regex := regexp.MustCompile("\\s+")
+	// 	// absoluteURL := e.Request.AbsoluteURL(link)
+	// 	// Visit link found on page
+	// 	// Only those links are visited which are in AllowedDomains
+	// 	c.Visit(e.Request.AbsoluteURL(link))
+	// })
 
 	c.OnHTML("div.jd-page__job-details div.job-details", func(e *colly.HTMLElement) {
 		var jobDetails JobDetails
@@ -194,7 +218,7 @@ func crawlJob(c *colly.Collector, client *mongo.Client, ctx context.Context) {
 		jobDetails.CreatedAt = time.Now().Unix()
 		jobDetails.UpdatedAt = jobDetails.CreatedAt
 		jobDetails.ID = primitive.NewObjectID()
-
+		jobDetails.CompanyId = jobURLToCompanyIdMap[jobDetails.Path]
 		// fmt.Printf("Title: %s\n", e.Text)
 		// fmt.Printf("Title: %s\n", e.Text)
 		// fmt.Printf("Title: %s\n", e.Text)
@@ -218,13 +242,13 @@ func crawlJob(c *colly.Collector, client *mongo.Client, ctx context.Context) {
 		fmt.Printf("\n\n")
 	})
 
-	c.OnHTML("ul.pagination li > a[href]", func(e *colly.HTMLElement) {
-		rel := e.Attr("rel")
-		if rel == "next" {
-			nextPage := e.Request.AbsoluteURL(e.Attr("href"))
-			c.Visit(nextPage)
-		}
-	})
+	// c.OnHTML("ul.pagination li > a[href]", func(e *colly.HTMLElement) {
+	// 	rel := e.Attr("rel")
+	// 	if rel == "next" {
+	// 		nextPage := e.Request.AbsoluteURL(e.Attr("href"))
+	// 		c.Visit(nextPage)
+	// 	}
+	// })
 
 	// c.Limit(&colly.LimitRule{
 	// 	// Filter domains affected by this rule
@@ -240,11 +264,11 @@ func crawlJob(c *colly.Collector, client *mongo.Client, ctx context.Context) {
 	})
 
 	// Start scraping on https://hackerspaces.org
-	c.Visit("https://itviec.com/it-jobs")
+	//c.Visit("https://itviec.com/it-jobs")
 
 }
 
-func crawlCompany(companyCollector *colly.Collector, client *mongo.Client, ctx context.Context) {
+func crawlCompany(companyCollector *colly.Collector, jobCollector *colly.Collector, client *mongo.Client, ctx context.Context) {
 
 	companyCollector.OnHTML("div.featured-companies a.featured-company", func(e *colly.HTMLElement) {
 		link := e.Attr("href")
@@ -257,17 +281,39 @@ func crawlCompany(companyCollector *colly.Collector, client *mongo.Client, ctx c
 		companyCollector.Visit(e.Request.AbsoluteURL(link))
 	})
 
-	companyCollector.OnHTML("div.company-content .headers", func(e *colly.HTMLElement) {
+	companyCollector.OnHTML("div.company-content > div.company-page", func(e *colly.HTMLElement) {
 		var company Company
 		fmt.Printf("\n\n")
 
 		company.Path = e.Request.URL.String()
 		fmt.Printf("Path: %s\n", company.Path)
 
-		company.Name = e.ChildText("h1.headers__info__name")
+		company.Name = e.ChildText(".headers h1.headers__info__name")
 		fmt.Printf("Name: %s\n", company.Name)
 
-		info := e.DOM.Find(".headers__info .svg-icon__text")
+		ratings := e.ChildText("div.company-page__container span.company-ratings__star-point")
+		floatNum, err := strconv.ParseFloat(ratings, 64)
+		if err != nil {
+			log.Println(err)
+		} else {
+			company.Stars = floatNum
+		}
+
+		fmt.Printf("Stars: %f\n", company.Stars)
+
+		//tags := e.ChildText("")
+		//tags = regex.ReplaceAllString(tags, " ")
+		//tags = strings.TrimSpace(tags)
+
+		e.ForEach("div.company-page__container ul.employer-skills .employer-skills__item > a[href]", func(_ int, elem *colly.HTMLElement) {
+			fmt.Println(elem.Text)
+			company.KeySkills = append(company.KeySkills, elem.Text)
+
+		})
+
+		fmt.Printf("KeySkills: %s\n", company.KeySkills)
+
+		info := e.DOM.Find(".headers .headers__info .svg-icon__text")
 		company.Location, _ = info.Eq(0).Html()
 		fmt.Printf("Location: %s\n", company.Location)
 
@@ -297,6 +343,20 @@ func crawlCompany(companyCollector *colly.Collector, client *mongo.Client, ctx c
 
 		company.ID = primitive.NewObjectID()
 
+		e.ForEach("div.company-page__container .company-page__left .job .job-details-link-wrapper a[href]", func(_ int, elem *colly.HTMLElement) {
+			link := elem.Attr("href")
+			// Print link
+			fmt.Printf("Link found: %q -> %s\n", elem.Text, link)
+			// absoluteURL := e.Request.AbsoluteURL(link)
+			// Visit link found on page
+			// Only those links are visited which are in AllowedDomains
+			//
+			absoluteURL := elem.Request.AbsoluteURL(link)
+			jobURLToCompanyIdMap[absoluteURL] = company.ID
+			jobCollector.Visit(absoluteURL)
+
+		})
+
 		fmt.Printf("%v", company)
 
 		ctx2, _ := context.WithTimeout(ctx, 1000*time.Millisecond)
@@ -317,6 +377,14 @@ func crawlCompany(companyCollector *colly.Collector, client *mongo.Client, ctx c
 		fmt.Println("---------------------------")
 		fmt.Printf("\n\n")
 	})
+
+	// companyCollector.OnHTML("h3.job-details-link-wrapper a[href]", func(e *colly.HTMLElement) {
+	// 	link := e.Attr("href")
+	// 	fmt.Printf("Link found: %q -> %s\n", e.Text, link)
+	// 	nextPage := e.Request.AbsoluteURL(link)
+	// 	jobCollector.Visit(nextPage)
+
+	// })
 
 	companyCollector.OnHTML("div.featured-companies #show-more-wrapper > #show_more a[href]", func(e *colly.HTMLElement) {
 		rel := e.Attr("rel")
