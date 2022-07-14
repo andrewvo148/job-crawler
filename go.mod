@@ -2,8 +2,6 @@ module job-crawler
 
 go 1.17
 
-require github.com/gocolly/colly v1.2.0
-
 require (
 	github.com/PuerkitoBio/goquery v1.8.0 // indirect
 	github.com/andybalholm/cascadia v1.3.1 // indirect
